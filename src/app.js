@@ -12,12 +12,22 @@ const app = express()
 // Security headers
 app.use(helmet())
 
-// CORS
+// CORS — hanya izinkan origin yang ada di whitelist
+// FRONTEND_URL bisa berisi beberapa domain dipisah koma, contoh:
+// FRONTEND_URL=https://crpt-journaling-build.vercel.app,http://localhost:3000
+const allowedOrigins = (process.env.FRONTEND_URL || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean)
+
 app.use(cors({
   origin: function (origin, callback) {
-    callback(null, true)
+    // Izinkan request tanpa origin (mobile app, curl, server-to-server, webhook)
+    if (!origin) return callback(null, true)
+    if (allowedOrigins.includes(origin)) return callback(null, true)
+    return callback(new Error(`CORS: origin ${origin} tidak diizinkan.`))
   },
-  credentials: true
+  credentials: true,
 }))
 
 // Body parsing

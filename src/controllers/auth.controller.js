@@ -27,6 +27,37 @@ const login = async (req, res) => {
   }
 }
 
+const googleLogin = async (req, res) => {
+  try {
+    const result = await authService.loginWithGoogle(req.body)
+    return success(res, result, 'Login Google berhasil.')
+  } catch (err) { return error(res, err.message, err.status || 500) }
+}
+
+const githubLogin = async (req, res) => {
+  try {
+    const result = await authService.loginWithGithub(req.body)
+    return success(res, result, 'Login GitHub berhasil.')
+  } catch (err) { return error(res, err.message, err.status || 500) }
+}
+
+const walletNonce = async (req, res) => {
+  try {
+    const { address } = req.query
+    if (!address) return error(res, 'Wallet address dibutuhkan.', 400)
+    const nonce = await authService.getWalletNonce(address)
+    return success(res, { nonce }, 'Nonce dibuat.')
+  } catch (err) { return error(res, err.message, err.status || 500) }
+}
+
+const walletLogin = async (req, res) => {
+  try {
+    const result = await authService.loginWithWallet(req.body)
+    return success(res, result, 'Login wallet berhasil.')
+  } catch (err) { return error(res, err.message, err.status || 401) }
+}
+
+
 // REFRESH TOKEN
 const refresh = async (req, res) => {
   try {
@@ -143,5 +174,5 @@ module.exports = {
   resendVerification,
   forgotPassword,
   resetPassword,
-  getMe,
+  getMe,googleLogin, githubLogin, walletNonce, walletLogin
 }

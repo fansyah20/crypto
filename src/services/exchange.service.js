@@ -3,39 +3,53 @@ const crypto    = require('crypto')
 const exchanges = require('./exchanges')
 
 // ENKRIPSI / DEKRIPSI API KEY
-const KEY       = (process.env.ENCRYPTION_KEY || 'cryptojournal_key_32_characters!').slice(0, 32)
-const ALGORITHM = 'aes-256-cbc'
+// AES-256-GCM dipakai (bukan CBC) karena GCM punya auth tag bawaan —
+// jadi ciphertext yang dimodifikasi/dipalsukan bakal ketauan (integrity check),
+// gak cuma confidentiality doang seperti CBC polos.
+const ALGORITHM = 'aes-256-gcm'
+
+// ENCRYPTION_KEY WAJIB di-set di .env, minimal 32 byte kalau di-hex-kan jadi 64 karakter.
+// Generate: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+const RAW_KEY = process.env.ENCRYPTION_KEY
+if (!RAW_KEY || RAW_KEY.length < 32) {
+  throw new Error('ENCRYPTION_KEY belum di-set atau kurang dari 32 karakter. Cek file .env.')
+}
+// Derive 32-byte key yang konsisten dari string env (support hex 64-char atau string biasa)
+const KEY = crypto.createHash('sha256').update(RAW_KEY).digest()
 
 const encrypt = (text) => {
   if (!text) return null
-  const iv      = crypto.randomBytes(16)
-  const cipher  = crypto.createCipheriv(ALGORITHM, Buffer.from(KEY), iv)
-  const enc     = Buffer.concat([cipher.update(text), cipher.final()])
-  return iv.toString('hex') + ':' + enc.toString('hex')
+  const iv     = crypto.randomBytes(12) // 96-bit IV, rekomendasi standar buat GCM
+  const cipher = crypto.createCipheriv(ALGORITHM, KEY, iv)
+  const enc    = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()])
+  const authTag = cipher.getAuthTag()
+  return `${iv.toString('hex')}:${enc.toString('hex')}:${authTag.toString('hex')}`
 }
 
 const decrypt = (text) => {
   if (!text) return null
   try {
-    const [ivHex, encHex] = text.split(':')
-    const decipher = crypto.createDecipheriv(ALGORITHM, Buffer.from(KEY), Buffer.from(ivHex, 'hex'))
-    return Buffer.concat([decipher.update(Buffer.from(encHex, 'hex')), decipher.final()]).toString()
-  } catch { return null }
+    const [ivHex, encHex, tagHex] = text.split(':')
+    if (!ivHex || !encHex || !tagHex) return null // format lama (CBC) atau corrupt — tolak
+    const decipher = crypto.createDecipheriv(ALGORITHM, KEY, Buffer.from(ivHex, 'hex'))
+    decipher.setAuthTag(Buffer.from(tagHex, 'hex'))
+    return Buffer.concat([decipher.update(Buffer.from(encHex, 'hex')), decipher.final()]).toString('utf8')
+  } catch {
+    // termasuk kalau auth tag gak cocok (ciphertext dimanipulasi) → gagal decrypt
+    return null
+  }
 }
 
 // CEK AKSES FITUR EXCHANGE
 const assertAccess = async (userId) => {
-  // TEMPORARY: bypass subscription check for testing
-  return true
-
-  // const sub = await prisma.userSubscription.findFirst({
-  //   where: { userId, status: 'active', endDate: { gt: new Date() } },
-  //   include: { plan: true },
-  // })
-  // const feat = (sub?.plan?.features || []).find(f => f.key === 'exchange_connect')
-  // if (!feat || !feat.value) {
-  //   throw { status: 403, message: 'Koneksi exchange hanya tersedia di paket Pro dan Elite. Upgrade untuk menggunakan fitur ini.' }
-  // }
+  const sub = await prisma.userSubscription.findFirst({
+    where: { userId, status: 'active', endDate: { gt: new Date() } },
+    include: { plan: true },
+  })
+  const feat = (sub?.plan?.features || []).find(f => f.key === 'exchange_connect')
+  if (!feat || !feat.value) {
+    throw { status: 403, message: 'Koneksi exchange hanya tersedia di paket Pro dan Elite. Upgrade untuk menggunakan fitur ini.' }
+  }
 }
 
 // GET DECRYPTED CREDENTIALS

@@ -2,7 +2,9 @@ const bcrypt = require('bcryptjs')
 const crypto = require('crypto')
 const prisma = require('../utils/database')
 const { generateAccessToken, generateRefreshToken, verifyRefreshToken, REFRESH_EXP_MS } = require('../utils/jwt')
-
+const { OAuth2Client } = require('google-auth-library')
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
+const { SiweMessage, generateNonce } = require('siwe')
 const SALT_ROUNDS = 12
 
 // REGISTER
@@ -89,6 +91,174 @@ const login = async ({ email, password, userAgent, ip }) => {
     accessToken,
     refreshToken,
   }
+}
+
+// Dipanggil dari frontend setelah dapat Google ID token (Google Identity Services)
+const loginWithGoogle = async ({ idToken }) => {
+  const ticket = await googleClient.verifyIdToken({
+    idToken,
+    audience: process.env.GOOGLE_CLIENT_ID,
+  })
+  const payload = ticket.getPayload() // { sub, email, name, picture, email_verified }
+  if (!payload?.email_verified) {
+    throw { status: 401, message: 'Email Google belum terverifikasi.' }
+  }
+
+  let user = await prisma.user.findFirst({
+    where: { OR: [{ provider: 'google', providerId: payload.sub }, { email: payload.email }] },
+  })
+
+  if (!user) {
+    // Bikin username unik dari email
+    const baseUsername = payload.email.split('@')[0]
+    let username = baseUsername
+    let i = 1
+    while (await prisma.user.findUnique({ where: { username } })) {
+      username = `${baseUsername}${i++}`
+    }
+
+    user = await prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          email: payload.email,
+          username,
+          avatarUrl: payload.picture,
+          isVerified: true,
+          provider: 'google',
+          providerId: payload.sub,
+        },
+      })
+      await tx.watchlist.create({ data: { userId: newUser.id, name: 'Watchlist Utama', isDefault: true } })
+      return newUser
+    })
+  } else if (user.provider !== 'google') {
+    // Email sama tapi daftar dulu via cara lain — link akun Google ke akun itu
+    user = await prisma.user.update({
+      where: { id: user.id },
+      data: { provider: user.provider ?? 'google', providerId: user.providerId ?? payload.sub },
+    })
+  }
+
+  return issueTokens(user)
+}
+
+const loginWithGithub = async ({ code }) => {
+  // 1. Tukar authorization code dengan access token
+  const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      client_id: process.env.GITHUB_CLIENT_ID,
+      client_secret: process.env.GITHUB_CLIENT_SECRET,
+      code,
+    }),
+  })
+  const tokenData = await tokenRes.json()
+  if (!tokenData.access_token) throw { status: 401, message: 'Gagal autentikasi dengan GitHub.' }
+
+  // 2. Ambil profil user
+  const profileRes = await fetch('https://api.github.com/user', {
+    headers: { Authorization: `Bearer ${tokenData.access_token}` },
+  })
+  const profile = await profileRes.json() // { id, login, avatar_url, email, name }
+
+  // 3. GitHub kadang gak return email publik → fetch endpoint /user/emails
+  let email = profile.email
+  if (!email) {
+    const emailRes = await fetch('https://api.github.com/user/emails', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    })
+    const emails = await emailRes.json()
+    email = emails.find(e => e.primary && e.verified)?.email
+  }
+  if (!email) throw { status: 400, message: 'Akun GitHub tidak punya email publik/terverifikasi.' }
+
+  let user = await prisma.user.findFirst({
+    where: { OR: [{ provider: 'github', providerId: String(profile.id) }, { email }] },
+  })
+
+  if (!user) {
+    let username = profile.login
+    let i = 1
+    while (await prisma.user.findUnique({ where: { username } })) {
+      username = `${profile.login}${i++}`
+    }
+    user = await prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          email,
+          username,
+          avatarUrl: profile.avatar_url,
+          isVerified: true,
+          provider: 'github',
+          providerId: String(profile.id),
+        },
+      })
+      await tx.watchlist.create({ data: { userId: newUser.id, name: 'Watchlist Utama', isDefault: true } })
+      return newUser
+    })
+  } else if (user.provider !== 'github') {
+    user = await prisma.user.update({
+      where: { id: user.id },
+      data: { provider: user.provider ?? 'github', providerId: user.providerId ?? String(profile.id) },
+    })
+  }
+
+  return issueTokens(user)
+}
+
+// STEP A — Frontend minta nonce sebelum bikin pesan SIWE
+const getWalletNonce = async (address) => {
+  const nonce = generateNonce()
+  await prisma.walletNonce.create({
+    data: {
+      address: address.toLowerCase(),
+      nonce,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 menit
+    },
+  })
+  return nonce
+}
+
+// STEP B — Frontend kirim message (yang sudah ditandatangani) + signature
+const loginWithWallet = async ({ message, signature }) => {
+  const siweMessage = new SiweMessage(message)
+
+  // Verifikasi tanda tangan cocok dengan address & domain di pesan
+  const result = await siweMessage.verify({ signature, domain: process.env.SIWE_DOMAIN })
+  if (!result.success) throw { status: 401, message: 'Signature wallet tidak valid.' }
+
+  const address = siweMessage.address.toLowerCase()
+
+  // Cek nonce yang dipakai memang yang kita terbitkan & belum expired
+  const storedNonce = await prisma.walletNonce.findFirst({
+    where: { address, nonce: siweMessage.nonce, expiresAt: { gt: new Date() } },
+  })
+  if (!storedNonce) throw { status: 401, message: 'Nonce tidak valid, sudah dipakai, atau kedaluwarsa.' }
+
+  // Nonce cuma boleh dipakai sekali — hapus setelah dipakai (cegah replay attack)
+  await prisma.walletNonce.delete({ where: { id: storedNonce.id } })
+
+  let user = await prisma.user.findUnique({ where: { walletAddress: address } })
+
+  if (!user) {
+    const username = `wallet_${address.slice(2, 8)}`
+    user = await prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          email: `${address}@wallet.local`, // placeholder unik — bisa diminta user lengkapi nanti
+          username,
+          walletAddress: address,
+          isVerified: true,
+          provider: 'wallet',
+        },
+      })
+      await tx.watchlist.create({ data: { userId: newUser.id, name: 'Watchlist Utama', isDefault: true } })
+      return newUser
+    })
+  }
+
+  return issueTokens(user)
 }
 
 // REFRESH TOKEN
@@ -215,4 +385,18 @@ const resendVerification = async (email) => {
   return { user, verifyToken }
 }
 
-module.exports = { register, login, refreshTokens, logout, logoutAll, verifyEmail, forgotPassword, resendVerification, resetPassword }
+const issueTokens = async (user) => {
+  const accessToken  = generateAccessToken(user)
+  const refreshToken = generateRefreshToken(user.id)
+  await prisma.refreshToken.create({
+    data: { userId: user.id, token: refreshToken, expiresAt: new Date(Date.now() + REFRESH_EXP_MS) },
+  })
+  const { passwordHash: _, verifyToken: __, ...safeUser } = user
+  return { user: safeUser, accessToken, refreshToken }
+}
+
+module.exports = {
+  register, login, refreshTokens, logout, logoutAll, verifyEmail,
+  forgotPassword, resendVerification, resetPassword,
+  loginWithGoogle, loginWithGithub, getWalletNonce, loginWithWallet, // ← baru
+}

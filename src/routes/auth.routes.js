@@ -6,6 +6,10 @@ const { authenticate } = require('../middleware/auth')
 const { authLimiter }  = require('../middleware/rateLimiter')
 
 // Public routes
+router.post('/google', authLimiter, ctrl.googleLogin)
+router.post('/github', authLimiter, ctrl.githubLogin)
+router.get('/wallet/nonce', authLimiter, ctrl.walletNonce)
+router.post('/wallet/verify', authLimiter, ctrl.walletLogin)
 router.post('/register',              authLimiter, registerRules, validate, ctrl.register)
 router.post('/login',                 authLimiter, loginRules, validate, ctrl.login)
 router.post('/refresh',               authLimiter, ctrl.refresh)

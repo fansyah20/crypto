@@ -11,7 +11,7 @@ model User {
   id                  String             @id @default(uuid())
   email               String             @unique
   username            String             @unique
-  passwordHash        String             @map("password_hash")
+  passwordHash        String?             @map("password_hash")
   avatarUrl           String?            @map("avatar_url")
   role                UserRole           @default(free)
   isVerified          Boolean            @default(false) @map("is_verified")
@@ -31,8 +31,23 @@ model User {
   refreshTokens       RefreshToken[]
   subscriptions       UserSubscription[]
   watchlists          Watchlist[]
+  provider            String?            @default("local") // "local" | "google" | "github" | "wallet"
+  providerId          String?            @map("provider_id")   // sub/id dari Google atau GitHub
+  walletAddress       String?            @unique @map("wallet_address")
 
+  @@unique([provider, providerId], map: "user_provider_unique")
   @@map("users")
+}
+
+model WalletNonce {
+  id        String   @id @default(uuid())
+  address   String   @map("address")        // lowercase wallet address
+  nonce     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([address])
+  @@map("wallet_nonces")
 }
 
 model RefreshToken {
@@ -400,6 +415,9 @@ enum TradePlatform {
   indodax
   tokocrypto
   triv
+  pintu   
+  bybit   
+  okx
   floq
   mifx
   csv_import

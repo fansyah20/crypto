@@ -160,7 +160,7 @@ const autoSyncExchanges = async () => {
         console.error(`[CRON] Auto-sync error for ${account.id}: ${err.message}`)
         await prisma.exchangeAccount.update({
           where: { id: account.id },
-          data:  { status: 'error', lastSyncStatus: err.message },
+          data: { status: 'error', lastSyncStatus: err.message?.slice(0, 190) },
         })
       }
     }

@@ -16,6 +16,7 @@ router.use('/calculator',  require('./riskCalculator.routes'))
 router.use('/calendar',    require('./calendar.routes'))
 router.use('/positions', require('./position.routes'))
 router.use('/mt', require('./mt.routes'))
+router.use('/attestation', require('./attestation.routes'))
 
 router.get('/health', (req, res) => res.json({
   success:   true,

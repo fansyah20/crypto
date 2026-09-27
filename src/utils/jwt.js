@@ -1,8 +1,18 @@
 const jwt = require('jsonwebtoken')
 const crypto = require('crypto')
 
-const ACCESS_SECRET  = process.env.JWT_ACCESS_SECRET  || 'access_secret_dev'
-const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'refresh_secret_dev'
+const ACCESS_SECRET  = process.env.JWT_ACCESS_SECRET
+const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET
+
+// Fail-fast: jangan pernah jalan pakai secret default yang gampang ditebak.
+// Kalau env belum di-set (misal lupa waktu deploy), server harus langsung
+// crash saat start, bukan diam-diam jalan dengan secret lemah.
+if (!ACCESS_SECRET || ACCESS_SECRET.length < 32) {
+  throw new Error('JWT_ACCESS_SECRET belum di-set atau kurang dari 32 karakter. Cek file .env.')
+}
+if (!REFRESH_SECRET || REFRESH_SECRET.length < 32) {
+  throw new Error('JWT_REFRESH_SECRET belum di-set atau kurang dari 32 karakter. Cek file .env.')
+}
 
 const generateAccessToken = (user) =>
   jwt.sign({ sub: user.id, email: user.email, role: user.role }, ACCESS_SECRET, { expiresIn: '1d' })
